@@ -2,8 +2,6 @@ from llama_cpp import Llama
 import json
 
 # 1. Setup the Model
-llm = Llama(model_path="myenv/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf")
-history = []
 
 # 2. Set the System Prompt
 # This "primes" the model to only output data, not conversational text.

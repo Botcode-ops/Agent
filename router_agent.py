@@ -1,56 +1,81 @@
+# pyrefly: ignore [missing-import]
 from llama_cpp import Llama
-import json
+from typing import List, Dict, Any, Tuple
+import sys
 
-# 1. Setup the Model
-llm = Llama(model_path="myenv/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf")
+class RouterAgentBot:
+    """A chatbot that routes incoming requests to specialized agents based on classification."""
 
-# 2. The Receptionist (Classification Prompt)
-classifier_prompt = """
-You are a routing assistant. Your job is to read the user's message 
-and pick the correct category. Only output the category name.
+    def __init__(self, model_path: str = "myenv/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf") -> None:
+        self.llm = Llama(model_path=model_path)
+        self.classifier_prompt = (
+            "You are a routing assistant. Your job is to read the user's message \n"
+            "and pick the correct category. Only output the category name.\n\n"
+            "CATEGORIES:\n"
+            "- MATH: For calculations and numbers.\n"
+            "- WEATHER: For questions about rain, sun, or temperature.\n"
+            "- GENERAL: For greetings, chat, or anything else.\n\n"
+            "Response format: ONLY the category name in uppercase."
+        )
+        self.math_expert_prompt = "You are a math expert. Provide clear, step-by-step solutions to math problems."
 
-CATEGORIES:
-- MATH: For calculations and numbers.
-- WEATHER: For questions about rain, sun, or temperature.
-- GENERAL: For greetings, chat, or anything else.
-
-Response format: ONLY the category name in uppercase.
-"""
-
-# 3. The Specialist Prompts
-math_expert_prompt = "You are a math expert. Provide clear, step-by-step solutions to math problems."
-
-print("Assistant: I am ready! I will route your request to the right specialist.")
-
-while True:
-    user_text = input("\nYou: ")
-    if not user_text: continue
-    
-    # --- STEP 1: CLASSIFICATION ---
-    classification_messages = [
-        {"role": "system", "content": classifier_prompt},
-        {"role": "user", "content": user_text}
-    ]
-    
-    response = llm.create_chat_completion(messages=classification_messages)
-    category = response["choices"][0]["message"]["content"].strip().upper()
-    
-    print(f"--- [RECEPTIONIST: Routing to {category}] ---")
-    
-    # --- STEP 2: ROUTING & SPECIALISTS ---
-    if "MATH" in category:
-        # Route to Math Specialist
+    def classify_query(self, user_query: str) -> str:
+        """Classify the user query into MATH, WEATHER, or GENERAL."""
         messages = [
-            {"role": "system", "content": math_expert_prompt},
-            {"role": "user", "content": user_text}
+            {"role": "system", "content": self.classifier_prompt},
+            {"role": "user", "content": user_query}
         ]
-        final_response = llm.create_chat_completion(messages=messages)
-        print(f"AI (Math Expert): {final_response['choices'][0]['message']['content']}")
+        response = self.llm.create_chat_completion(messages=messages)
+        category = str(response["choices"][0]["message"]["content"]).strip().upper()
+        return category
+
+    def process_query(self, user_query: str) -> Tuple[str, str]:
+        """Classify and route the query, returning the specialist name and response."""
+        category = self.classify_query(user_query)
         
-    elif "WEATHER" in category:
-        # Route to Weather Specialist (Direct Code)
-        print("AI (Weather System): It is currently rainy!")
+        if "MATH" in category:
+            messages = [
+                {"role": "system", "content": self.math_expert_prompt},
+                {"role": "user", "content": user_query}
+            ]
+            response = self.llm.create_chat_completion(messages=messages)
+            return "Math Expert", str(response["choices"][0]["message"]["content"])
         
-    else:
-        # Route to General Specialist (Your Greeting!)
-        print("AI: Hello! How can I help you today?")
+        elif "WEATHER" in category:
+            return "Weather System", "It is currently rainy!"
+            
+        else:
+            return "General Specialist", "Hello! How can I help you today?"
+
+def main() -> None:
+    print("Initializing Router Agent Bot...")
+    try:
+        bot = RouterAgentBot()
+    except Exception as e:
+        print(f"Error initializing chatbot: {e}")
+        sys.exit(1)
+
+    print("Assistant: I am ready! I will route your request to the right specialist.")
+    print("\n--- Router Agent Loop ---")
+    print("Type 'exit' or 'quit' to end the session.")
+    
+    while True:
+        try:
+            user_text = input("\nYou: ").strip()
+        except (KeyboardInterrupt, EOFError):
+            print("\nExiting. Goodbye!")
+            break
+
+        if not user_text:
+            continue
+
+        if user_text.lower() in ["exit", "quit"]:
+            print("Goodbye!")
+            break
+
+        specialist, response = bot.process_query(user_text)
+        print(f"--- [RECEPTIONIST: Routing to {specialist.upper()}] ---")
+        print(f"AI ({specialist}): {response}")
+
+if __name__ == "__main__":
+    main()

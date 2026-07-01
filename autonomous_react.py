@@ -1,87 +1,124 @@
+# pyrefly: ignore [missing-import]
 from llama_cpp import Llama
+from typing import List, Dict, Any, Optional
 import json
+import sys
 
-# 1. Setup the Model
-llm = Llama(model_path="myenv/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf")
+class AutonomousReActAgent:
+    """An autonomous Reason-Act-Observe loop (ReAct) agent that calls functions and reasons iteratively."""
 
-# 2. Define the Tools
-def calculate(a, b, operation):
-    print(f"\n[System: Executing calculate {a} {operation} {b}]")
-    if operation == "add": return str(a + b)
-    if operation == "multiple": return str(a * b)
-    return "Error"
-
-tools = [
-    {
-        "type": "function",
-        "function": {
-            "name": "calculate",
-            "description": "Perform math operations",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "a": {"type": "number"},
-                    "b": {"type": "number"},
-                    "operation": {"type": "string", "enum": ["add", "multiple"]}
-                },
-                "required": ["a", "b", "operation"]
+    def __init__(self, model_path: str = "myenv/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf") -> None:
+        self.llm = Llama(model_path=model_path)
+        self.system_prompt = (
+            "You are an autonomous agent. Solve the user's request step-by-step.\n"
+            "For each step, you must follow this format:\n\n"
+            "THOUGHT: (Explain what you are doing)\n"
+            "ACTION: (Call a tool if needed)\n\n"
+            "When you have the final result, you MUST say:\n"
+            "FINAL ANSWER: (Your final response)"
+        )
+        self.tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "calculate",
+                    "description": "Perform math operations",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "a": {"type": "number"},
+                            "b": {"type": "number"},
+                            "operation": {"type": "string", "enum": ["add", "multiple"]}
+                        },
+                        "required": ["a", "b", "operation"]
+                    }
+                }
             }
-        }
-    }
-]
+        ]
 
-# 3. The ReAct System Prompt
-system_prompt = """
-You are an autonomous agent. Solve the user's request step-by-step.
-For each step, you must follow this format:
+    def calculate(self, a: float, b: float, operation: str) -> str:
+        """Call calculate tool."""
+        print(f"\n[System: Executing calculate {a} {operation} {b}]")
+        op = operation.strip().lower()
+        if op == "add":
+            return str(a + b)
+        if op == "multiple":
+            return str(a * b)
+        return "Error"
 
-THOUGHT: (Explain what you are doing)
-ACTION: (Call a tool if needed)
+    def run(self, user_request: str, max_steps: int = 5) -> Optional[str]:
+        """Execute the ReAct loop up to max_steps."""
+        history = [
+            {"role": "system", "content": self.system_prompt},
+            {"role": "user", "content": user_request}
+        ]
 
-When you have the final result, you MUST say:
-FINAL ANSWER: (Your final response)
-"""
+        for i in range(max_steps):
+            print(f"--- [AI Thinking Step {i+1}] ---")
+            
+            response = self.llm.create_chat_completion(messages=history, tools=self.tools)
+            message = response["choices"][0]["message"]
+            
+            # Check if the AI is finished
+            content = message.get("content")
+            if content and "FINAL ANSWER" in content:
+                print(f"AI: {content}")
+                return str(content)
+            
+            # Handle tool calls
+            if message.get("tool_calls"):
+                history.append(message)
+                for tool_call in message["tool_calls"]:
+                    fn_name = tool_call["function"]["name"]
+                    args = json.loads(tool_call["function"]["arguments"])
+                    
+                    result = self.calculate(
+                        a=float(args.get("a", 0)), 
+                        b=float(args.get("b", 0)), 
+                        operation=str(args.get("operation", "add"))
+                    )
+                    
+                    history.append({
+                        "role": "tool",
+                        "tool_call_id": tool_call["id"],
+                        "name": fn_name,
+                        "content": result
+                    })
+                    print(f"Observation: Result is {result}")
+            else:
+                # No tool calls, append message to history
+                history.append(message)
+                if content:
+                    print(f"AI Thought: {content}")
+        
+        return None
 
-# 4. The Main Loop
-while True:
-    user_text = input("\nUser Request: ")
-    if not user_text: continue
+def main() -> None:
+    print("Initializing Autonomous ReAct Agent...")
+    try:
+        bot = AutonomousReActAgent()
+    except Exception as e:
+        print(f"Error initializing agent: {e}")
+        sys.exit(1)
+
+    print("\n--- Autonomous ReAct Loop ---")
+    print("Type 'exit' or 'quit' to end the session.")
     
-    history = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_text}
-    ]
-
-    # --- THE AUTONOMOUS LOOP (Max 5 steps) ---
-    for i in range(5):
-        print(f"--- [AI Thinking Step {i+1}] ---")
-        
-        response = llm.create_chat_completion(messages=history, tools=tools)
-        message = response["choices"][0]["message"]
-        
-        # Check if the AI is finished
-        if message.get("content") and "FINAL ANSWER" in message["content"]:
-            print(f"AI: {message['content']}")
+    while True:
+        try:
+            user_text = input("\nUser Request: ").strip()
+        except (KeyboardInterrupt, EOFError):
+            print("\nExiting. Goodbye!")
             break
-        
-        # Handle tool calls (The "ACTION" and "OBSERVATION")
-        if message.get("tool_calls"):
-            history.append(message)
-            for tool_call in message["tool_calls"]:
-                fn_name = tool_call["function"]["name"]
-                args = json.loads(tool_call["function"]["arguments"])
-                
-                result = calculate(args["a"], args["b"], args["operation"])
-                
-                history.append({
-                    "role": "tool",
-                    "tool_call_id": tool_call["id"],
-                    "name": fn_name,
-                    "content": result
-                })
-                print(f"Observation: Result is {result}")
-        else:
-            # If no tool call and no final answer, just add the thought to history
-            history.append(message)
-            if message.get("content"):
-                print(f"AI Thought: {message['content']}")
+
+        if not user_text:
+            continue
+
+        if user_text.lower() in ["exit", "quit"]:
+            print("Goodbye!")
+            break
+
+        bot.run(user_text)
+
+if __name__ == "__main__":
+    main()

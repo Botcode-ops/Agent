@@ -1,15 +1,22 @@
+# pyrefly: ignore [missing-import]
+"""
+Master Agent System.
+
+An agent orchestration framework utilizing llama-cpp-python and GBNF grammars
+to dynamically route query processing to specialized Math and Information agents.
+"""
+
 from llama_cpp import Llama, LlamaGrammar
 import json
+import sys
+from typing import Dict, Any, Tuple, Optional
 
-# 1. Setup the Model
-# We'll use the same model for all roles but change prompts/grammars
+# --- CONFIGURATION ---
 MODEL_PATH = "myenv/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf"
-llm = Llama(model_path=MODEL_PATH, n_ctx=2048)
 
-# --- GRAMMARS ---
+# --- GBNF GRAMMAR DEFINITIONS ---
 
-# ROUTER_GRAMMAR: Choose which agent to use
-ROUTER_GRAMMAR = r"""
+ROUTER_GRAMMAR_SRC = r"""
 root ::= rtmain
 rtmain ::= "{" ws "\"thought\"" ws ":" ws rtstr "," ws "\"agent\"" ws ":" ws rtagent "}"
 rtagent ::= "\"math\"" | "\"info\"" | "\"none\""
@@ -17,8 +24,7 @@ rtstr ::= "\"" ([^"\\\\] | "\\" ["\\/bfnrt] | "\\" "u" [0-9a-fA-F] [0-9a-fA-F] [
 ws ::= [ \t\n\r]*
 """
 
-# MATH_GRAMMAR (Lesson 9 style)
-MATH_GRAMMAR = r"""
+MATH_GRAMMAR_SRC = r"""
 root ::= mtmain
 mtmain ::= "{" ws "\"thought\"" ws ":" ws mtstr "," ws "\"action\"" ws ":" ws mtact "," ws "\"params\"" ws ":" ws mtprm ws "}"
 mtact ::= "\"calculate\"" | "\"final_answer\""
@@ -31,8 +37,7 @@ mtnum ::= "-"? ([0-9] | [1-9] [0-9]*) ("." [0-9]+)? ([eE] [+-]? [0-9]+)?
 ws ::= [ \t\n\r]*
 """
 
-# INFO_GRAMMAR: Standard structured response
-INFO_GRAMMAR = r"""
+INFO_GRAMMAR_SRC = r"""
 root ::= itmain
 itmain ::= "{" ws "\"thought\"" ws ":" ws itstr "," ws "\"response\"" ws ":" ws itstr "}"
 itstr ::= "\"" ([^"\\\\] | "\\" ["\\/bfnrt] | "\\" "u" [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F])* "\""
@@ -40,91 +45,153 @@ ws ::= [ \t\n\r]*
 """
 
 
-g_router = LlamaGrammar.from_string(ROUTER_GRAMMAR)
-g_math = LlamaGrammar.from_string(MATH_GRAMMAR)
-g_info = LlamaGrammar.from_string(INFO_GRAMMAR)
-
 # --- TOOLS ---
 
-def calculate(a, b, operation):
+def calculate(a: Any, b: Any, operation: str) -> str:
+    """
+    Perform mathematical addition or multiplication.
+    
+    Args:
+        a: First numeric value (float-convertible).
+        b: Second numeric value (float-convertible).
+        operation: Calculation operation ('add' or 'multiply').
+        
+    Returns:
+        String result of the calculation or error message.
+    """
     print(f"\n[MATH TOOL: {operation} {a} and {b}]")
     try:
-        a, b = float(a), float(b)
+        num_a = float(a)
+        num_b = float(b)
         op = str(operation).lower().strip()
-        if op == "add": return str(a + b)
-        if op == "multiply": return str(a * b)
+        if op == "add":
+            return str(num_a + num_b)
+        elif op == "multiply":
+            return str(num_a * num_b)
         return f"Unsupported operation: {op}"
-    except Exception as e:
+    except (ValueError, TypeError) as e:
         return f"Error: {e}"
 
-# --- AGENT LOGIC ---
 
-def run_math_agent(user_query):
-    print("\n[HANDOVER: Math Agent taking control...]")
-    history = [
-        {
-            "role": "system", 
-            "content": (
-                "You are a Math Specialist. Use the 'calculate' tool.\n"
-                "calculate params: {'a': number, 'b': number, 'operation': 'add' or 'multiply'}\n"
-                "Example: {'thought': 'Adding', 'action': 'calculate', 'params': {'a': 1, 'b': 2, 'operation': 'add'}}\n"
-                "When done, use 'final_answer'."
-            )
-        },
-        {"role": "user", "content": user_query}
-    ]
-    
-    for _ in range(3):
-        res = llm.create_chat_completion(messages=history, grammar=g_math, max_tokens=256)
-        output = json.loads(res["choices"][0]["message"]["content"])
+# --- AGENTS ---
+
+class MathAgent:
+    """Specialist agent designed to resolve mathematical problems using external tools."""
+
+    def __init__(self, llm: Llama, grammar: LlamaGrammar) -> None:
+        self.llm = llm
+        self.grammar = grammar
+
+    def run(self, user_query: str) -> str:
+        """
+        Execute the math agent reasoning and action loop.
         
-        print(f"MATH THOUGHT: {output['thought']}")
-        
-        if output['action'] == "final_answer":
-            return output['params'].get('answer')
-        
-        if output['action'] == "calculate":
-            p = output['params']
-            obs = calculate(p.get('a'), p.get('b'), p.get('operation'))
-            print(f"OBSERVATION: {obs}")
-            history.append({"role": "assistant", "content": json.dumps(output)})
-            history.append({"role": "user", "content": f"Observation: {obs}"})
-    return "Math agent timed out."
-
-def run_info_agent(user_query):
-    print("\n[HANDOVER: Information Agent taking control...]")
-    res = llm.create_chat_completion(
-        messages=[
-            {"role": "system", "content": "You are an Information Specialist. Provide a ONE SENTENCE fact."},
-            {"role": "user", "content": user_query}
-        ],
-        grammar=g_info,
-        max_tokens=400
-    )
-    output = json.loads(res["choices"][0]["message"]["content"])
-    print(f"INFO THOUGHT: {output['thought']}")
-    return output['response']
-
-# --- MASTER AGENT ---
-
-def master_agent():
-    print("--- Master Agent System ---")
-    print("Type 'exit' to quit.")
-    
-    while True:
-        try:
-            user_input = input("\nUser: ")
-        except EOFError:
-            break
+        Args:
+            user_query: The math-related problem query.
             
-        if not user_input or user_input.lower() in ["exit", "quit"]: break
+        Returns:
+            The calculated final answer or a timeout error.
+        """
+        print("\n[HANDOVER: Math Agent taking control...]")
+        history = [
+            {
+                "role": "system",
+                "content": (
+                    "You are a Math Specialist. Use the 'calculate' tool.\n"
+                    "calculate params: {'a': number, 'b': number, 'operation': 'add' or 'multiply'}\n"
+                    "Example: {'thought': 'Adding', 'action': 'calculate', 'params': {'a': 1, 'b': 2, 'operation': 'add'}}\n"
+                    "When done, use 'final_answer'."
+                )
+            },
+            {"role": "user", "content": user_query}
+        ]
+
+        for _ in range(3):
+            try:
+                res = self.llm.create_chat_completion(
+                    messages=history,
+                    grammar=self.grammar,
+                    max_tokens=256
+                )
+                output = json.loads(res["choices"][0]["message"]["content"])
+            except (json.JSONDecodeError, KeyError, IndexError) as e:
+                return f"Math agent error during completion decoding: {e}"
+
+            print(f"MATH THOUGHT: {output.get('thought')}")
+
+            action = output.get("action")
+            params = output.get("params", {})
+
+            if action == "final_answer":
+                return str(params.get("answer", "No answer provided in parameters"))
+
+            if action == "calculate":
+                obs = calculate(params.get("a"), params.get("b"), params.get("operation"))
+                print(f"OBSERVATION: {obs}")
+                history.append({"role": "assistant", "content": json.dumps(output)})
+                history.append({"role": "user", "content": f"Observation: {obs}"})
+            else:
+                return f"Math agent error: Invalid action '{action}' selected."
+
+        return "Math agent timed out."
+
+
+class InfoAgent:
+    """Specialist agent designed to query and retrieve general knowledge facts."""
+
+    def __init__(self, llm: Llama, grammar: LlamaGrammar) -> None:
+        self.llm = llm
+        self.grammar = grammar
+
+    def run(self, user_query: str) -> str:
+        """
+        Query the information specialist agent for a single-sentence fact.
         
-        # 1. Routing Phase
-        print("\n[MASTER: Routing query...]")
-        res = llm.create_chat_completion(
+        Args:
+            user_query: The factual user query.
+            
+        Returns:
+            A single sentence response containing the fact.
+        """
+        print("\n[HANDOVER: Information Agent taking control...]")
+        try:
+            res = self.llm.create_chat_completion(
+                messages=[
+                    {"role": "system", "content": "You are an Information Specialist. Provide a ONE SENTENCE fact."},
+                    {"role": "user", "content": user_query}
+                ],
+                grammar=self.grammar,
+                max_tokens=400
+            )
+            output = json.loads(res["choices"][0]["message"]["content"])
+        except (json.JSONDecodeError, KeyError, IndexError) as e:
+            return f"Information agent decoding error: {e}"
+
+        print(f"INFO THOUGHT: {output.get('thought')}")
+        return str(output.get("response", "No response found"))
+
+
+class RouterAgent:
+    """Receptionist agent that determines which agent should process the user query."""
+
+    def __init__(self, llm: Llama, grammar: LlamaGrammar) -> None:
+        self.llm = llm
+        self.grammar = grammar
+
+    def route(self, user_query: str) -> Tuple[str, str]:
+        """
+        Determine domain routing ('math', 'info', 'none') for the user query.
+        
+        Args:
+            user_query: Input request text.
+            
+        Returns:
+            A tuple of (routed_agent_name, agent_thought).
+        """
+        res = self.llm.create_chat_completion(
             messages=[
                 {
-                    "role": "system", 
+                    "role": "system",
                     "content": (
                         "You are a Router Agent. Categorize the user request.\n"
                         "Rules:\n"
@@ -137,34 +204,92 @@ def master_agent():
                         "JSON: {\"thought\": \"Biography request\", \"agent\": \"info\"}\n"
                     )
                 },
-                {"role": "user", "content": user_input}
+                {"role": "user", "content": user_query}
             ],
-            grammar=g_router,
+            grammar=self.grammar,
             max_tokens=100
         )
-        
-        try:
-            route_obj = json.loads(res["choices"][0]["message"]["content"])
-        except Exception as e:
-            print(f"ROUTER ERROR: {e}")
-            continue
+        output = json.loads(res["choices"][0]["message"]["content"])
+        return str(output.get("agent", "none")), str(output.get("thought", ""))
 
-        agent = route_obj.get("agent")
-        print(f"ROUTER THOUGHT: {route_obj.get('thought')}")
+
+# --- MASTER ORCHESTRATOR ---
+
+class MasterAgentSystem:
+    """Primary system manager coordinating routing and execution of sub-agents."""
+
+    def __init__(self, model_path: str = MODEL_PATH) -> None:
+        print(f"Initializing Llama engine with model: {model_path}")
+        self.llm = Llama(model_path=model_path, n_ctx=2048)
+        
+        # Load Grammars
+        self.g_router = LlamaGrammar.from_string(ROUTER_GRAMMAR_SRC)
+        self.g_math = LlamaGrammar.from_string(MATH_GRAMMAR_SRC)
+        self.g_info = LlamaGrammar.from_string(INFO_GRAMMAR_SRC)
+        
+        # Instantiate Sub-agents
+        self.router_agent = RouterAgent(self.llm, self.g_router)
+        self.math_agent = MathAgent(self.llm, self.g_math)
+        self.info_agent = InfoAgent(self.llm, self.g_info)
+
+    def handle_query(self, user_query: str) -> str:
+        """
+        Route and execute the query, returning the final computed response.
+        
+        Args:
+            user_query: The incoming user question.
+            
+        Returns:
+            The final answer or error details.
+        """
+        print("\n[MASTER: Routing query...]")
+        try:
+            agent, thought = self.router_agent.route(user_query)
+        except Exception as e:
+            return f"ROUTER ERROR: Failed to classify query. {e}"
+
+        print(f"ROUTER THOUGHT: {thought}")
         print(f"DECISION: Route to {agent}")
 
-        # 2. Execution Phase
         try:
             if agent == "math":
-                final_res = run_math_agent(user_input)
+                return self.math_agent.run(user_query)
             elif agent == "info":
-                final_res = run_info_agent(user_input)
+                return self.info_agent.run(user_query)
             else:
-                final_res = "I'm not sure how to help with that."
+                return "I'm not sure how to help with that."
         except Exception as e:
-            final_res = f"Agent Error: {e}"
-            
+            return f"Agent Error: {e}"
+
+
+def main() -> None:
+    """Interactive loop entrypoint."""
+    print("--- Master Agent System ---")
+    print("Type 'exit' or 'quit' to end the session.")
+    
+    try:
+        system = MasterAgentSystem()
+    except Exception as e:
+        print(f"Initialization Error: Could not load the agent system models. {e}")
+        sys.exit(1)
+
+    while True:
+        try:
+            user_input = input("\nUser: ").strip()
+        except (KeyboardInterrupt, EOFError):
+            print("\nExiting. Goodbye!")
+            break
+
+        if not user_input:
+            continue
+
+        if user_input.lower() in ["exit", "quit"]:
+            print("Exiting. Goodbye!")
+            break
+
+        final_res = system.handle_query(user_input)
         print(f"\nFINAL SYSTEM RESPONSE: {final_res}")
 
+
 if __name__ == "__main__":
-    master_agent()
+    main()

@@ -1,7 +1,7 @@
 from llama_cpp import Llama
 import json
 
-# 1. Setup the Model
+# 1. Setup the Model 
 llm = Llama(model_path="myenv/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf")
 
 # 2. Define the Python Functions (The "Abilities")
